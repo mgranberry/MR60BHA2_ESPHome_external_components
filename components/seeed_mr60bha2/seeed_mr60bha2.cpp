@@ -24,108 +24,94 @@ void MR60BHA2Component::dump_config() {
 #endif
 }
 
-// main loop
-void MR60BHA2Component::loop() {
-  uint8_t byte;
-
-  // Is there data on the serial port
-  while (this->available()) {
-    this->read_byte(&byte);
-    this->rx_message_.push_back(byte);
-    if (!this->validate_message_()) {
-      this->rx_message_.clear();
-    }
-  }
-}
-
-/**
- * @brief Calculate the checksum for a byte array.
- *
- * This function calculates the checksum for the provided byte array using an
- * XOR-based checksum algorithm.
- *
- * @param data The byte array to calculate the checksum for.
- * @param len The length of the byte array.
- * @return The calculated checksum.
- */
 static uint8_t calculate_checksum(const uint8_t *data, size_t len) {
   uint8_t checksum = 0;
   for (size_t i = 0; i < len; i++) {
     checksum ^= data[i];
   }
-  checksum = ~checksum;
-  return checksum;
+  return ~checksum;
 }
 
-/**
- * @brief Validate the checksum of a byte array.
- *
- * This function validates the checksum of the provided byte array by comparing
- * it to the expected checksum.
- *
- * @param data The byte array to validate.
- * @param len The length of the byte array.
- * @param expected_checksum The expected checksum.
- * @return True if the checksum is valid, false otherwise.
- */
-static bool validate_checksum(const uint8_t *data, size_t len, uint8_t expected_checksum) {
-  return calculate_checksum(data, len) == expected_checksum;
+void MR60BHA2Component::discard_until_sof_() {
+  size_t shift = 1;
+  while (shift < this->rx_count_ && this->rx_buf_[shift] != FRAME_SOF) {
+    shift++;
+  }
+  if (shift < this->rx_count_) {
+    this->rx_count_ -= shift;
+    memmove(this->rx_buf_, this->rx_buf_ + shift, this->rx_count_);
+  } else {
+    this->rx_count_ = 0;
+  }
 }
 
-bool MR60BHA2Component::validate_message_() {
-  size_t at = this->rx_message_.size() - 1;
-  auto *data = &this->rx_message_[0];
+void MR60BHA2Component::loop() {
+  size_t available = this->available();
+  if (available == 0)
+    return;
 
-  if (at == 0) {
-    return data[at] == FRAME_HEADER_BUFFER;
+  size_t space = FRAME_BUFFER_SIZE - this->rx_count_;
+  if (space == 0) {
+    ESP_LOGW(TAG, "RX buffer full, resetting");
+    this->rx_count_ = 0;
+    space = FRAME_BUFFER_SIZE;
   }
 
-  if (at <= 6) {
-    return true;
+  size_t to_read = std::min(available, space);
+  this->read_array(this->rx_buf_ + this->rx_count_, to_read);
+  this->rx_count_ += to_read;
+
+  while (this->rx_count_ > 0) {
+    if (this->rx_buf_[0] != FRAME_SOF) {
+      this->discard_until_sof_();
+      continue;
+    }
+    if (!this->parse_frame_())
+      break;
   }
+}
 
-  uint16_t frame_type = encode_uint16(data[5], data[6]);
+bool MR60BHA2Component::parse_frame_() {
+  uint8_t *data = this->rx_buf_;
+  size_t count = this->rx_count_;
 
-  if (frame_type != BREATH_RATE_TYPE_BUFFER && frame_type != HEART_RATE_TYPE_BUFFER &&
-      frame_type != DISTANCE_TYPE_BUFFER && frame_type != PEOPLE_EXIST_TYPE_BUFFER &&
-      frame_type != PRINT_CLOUD_BUFFER) {
+  if (count < FRAME_HEADER_SIZE)
     return false;
-  }
 
-  uint8_t header_checksum = data[at];
-
-  if (at == 7) {
-    if (!validate_checksum(data, 7, header_checksum)) {
-      ESP_LOGE(TAG, "HEAD_CKSUM_FRAME ERROR: 0x%02x", header_checksum);
-      ESP_LOGV(TAG, "GET FRAME: %s", format_hex_pretty(data, 8).c_str());
-      return false;
-    }
+  if (calculate_checksum(data, 7) != data[7]) {
+    ESP_LOGD(TAG, "Header checksum failed, resyncing");
+    this->discard_until_sof_();
     return true;
   }
 
-  // Wait until all data is read
   uint16_t length = encode_uint16(data[3], data[4]);
-  if (at - 8 < length) {
+  if (length > FRAME_MAX_DATA_LENGTH) {
+    ESP_LOGD(TAG, "Frame length %u exceeds max, resyncing", length);
+    this->discard_until_sof_();
     return true;
   }
 
-  uint8_t data_checksum = data[at];
-  if (at == 8 + length) {
-    if (!validate_checksum(data + 8, length, data_checksum)) {
-      ESP_LOGE(TAG, "DATA_CKSUM_FRAME ERROR: 0x%02x", data_checksum);
-      ESP_LOGV(TAG, "GET FRAME: %s", format_hex_pretty(data, 8 + length).c_str());
-      return false;
-    }
+  size_t total_frame_size = FRAME_HEADER_SIZE + length + 1;
+  if (count < total_frame_size)
+    return false;
+
+  if (calculate_checksum(data + FRAME_HEADER_SIZE, length) != data[FRAME_HEADER_SIZE + length]) {
+    ESP_LOGD(TAG, "Data checksum failed, resyncing");
+    this->discard_until_sof_();
+    return true;
   }
 
   uint16_t frame_id = encode_uint16(data[1], data[2]);
-  const uint8_t *frame_data = data + 8;
-  ESP_LOGV(TAG, "Received Frame: ID: 0x%04x, Type: 0x%04x, Data: [%s] Raw Data: [%s]", frame_id, frame_type,
-           format_hex_pretty(frame_data, length).c_str(), format_hex_pretty(this->rx_message_).c_str());
-  this->process_frame_(frame_id, frame_type, data + 8, length);
+  uint16_t frame_type = encode_uint16(data[5], data[6]);
 
-  // Return false to reset rx buffer
-  return false;
+  ESP_LOGV(TAG, "Frame OK: ID=0x%04x Type=0x%04x Len=%u", frame_id, frame_type, length);
+  this->process_frame_(frame_id, frame_type, data + FRAME_HEADER_SIZE, length);
+
+  this->rx_count_ -= total_frame_size;
+  if (this->rx_count_ > 0) {
+    memmove(this->rx_buf_, this->rx_buf_ + total_frame_size, this->rx_count_);
+  }
+  return true;
 }
 
 void MR60BHA2Component::process_frame_(uint16_t frame_id, uint16_t frame_type, const uint8_t *data, size_t length) {
