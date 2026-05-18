@@ -138,11 +138,12 @@ void MR60BHA2Component::process_frame_(uint16_t frame_id, uint16_t frame_type, c
       }
       break;
     case PEOPLE_EXIST_TYPE_BUFFER:
-      if (this->has_target_binary_sensor_ != nullptr && length >= 2) {
+      if (length >= 2) {
         uint16_t has_target_int = encode_uint16(data[1], data[0]);
         this->last_has_target_ms_ = millis();
         bool has_target_bool = has_target_int != 0;
-        if (this->has_target_binary_sensor_->state != has_target_bool) {
+        if (this->has_target_binary_sensor_ != nullptr &&
+            this->has_target_binary_sensor_->state != has_target_bool) {
           this->has_target_binary_sensor_->publish_state(has_target_bool);
         }
         if (!has_target_bool) {
