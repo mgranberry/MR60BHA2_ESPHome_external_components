@@ -49,8 +49,17 @@ class MR60BHA2Component : public Component,
   bool parse_frame_();
   void discard_until_sof_();
 
+  void check_staleness_();
+
   uint8_t rx_buf_[FRAME_BUFFER_SIZE];
   size_t rx_count_{0};
+
+  static const uint32_t STALE_TIMEOUT_MS = 30000;
+  uint32_t last_breath_rate_ms_{0};
+  uint32_t last_heart_rate_ms_{0};
+  uint32_t last_distance_ms_{0};
+  uint32_t last_num_targets_ms_{0};
+  uint32_t last_has_target_ms_{0};
 };
 
 }  // namespace seeed_mr60bha2

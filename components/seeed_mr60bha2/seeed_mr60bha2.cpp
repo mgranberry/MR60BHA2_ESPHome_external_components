@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 
 #include <cinttypes>
+#include <cmath>
 #include <utility>
 
 namespace esphome {
@@ -46,6 +47,8 @@ void MR60BHA2Component::discard_until_sof_() {
 }
 
 void MR60BHA2Component::loop() {
+  this->check_staleness_();
+
   size_t available = this->available();
   if (available == 0)
     return;
@@ -127,6 +130,7 @@ void MR60BHA2Component::process_frame_(uint16_t frame_id, uint16_t frame_type, c
         if (current_breath_rate_int != 0) {
           float breath_rate_float;
           memcpy(&breath_rate_float, &current_breath_rate_int, sizeof(float));
+          this->last_breath_rate_ms_ = millis();
           if (this->breath_rate_sensor_->state == breath_rate_float) {
             break;
           }
@@ -137,22 +141,23 @@ void MR60BHA2Component::process_frame_(uint16_t frame_id, uint16_t frame_type, c
     case PEOPLE_EXIST_TYPE_BUFFER:
       if (this->has_target_binary_sensor_ != nullptr && length >= 2) {
         uint16_t has_target_int = encode_uint16(data[1], data[0]);
+        this->last_has_target_ms_ = millis();
         if (this->has_target_binary_sensor_->state == has_target_int) {
           break;
         }
         this->has_target_binary_sensor_->publish_state(has_target_int);
         if (has_target_int == 0) {
-          if (this->breath_rate_sensor_ != nullptr && this->breath_rate_sensor_->state != 0.0) {
-            this->breath_rate_sensor_->publish_state(0.0);
+          if (this->breath_rate_sensor_ != nullptr && !std::isnan(this->breath_rate_sensor_->state)) {
+            this->breath_rate_sensor_->publish_state(NAN);
           }
-          if (this->heart_rate_sensor_ != nullptr && this->heart_rate_sensor_->state != 0.0) {
-            this->heart_rate_sensor_->publish_state(0.0);
+          if (this->heart_rate_sensor_ != nullptr && !std::isnan(this->heart_rate_sensor_->state)) {
+            this->heart_rate_sensor_->publish_state(NAN);
           }
-          if (this->distance_sensor_ != nullptr && this->distance_sensor_->state != 0.0) {
-            this->distance_sensor_->publish_state(0.0);
+          if (this->distance_sensor_ != nullptr && !std::isnan(this->distance_sensor_->state)) {
+            this->distance_sensor_->publish_state(NAN);
           }
-          if (this->num_targets_sensor_ != nullptr && this->num_targets_sensor_->state != 0) {
-            this->num_targets_sensor_->publish_state(0);
+          if (this->num_targets_sensor_ != nullptr && !std::isnan(this->num_targets_sensor_->state)) {
+            this->num_targets_sensor_->publish_state(NAN);
           }
         }
       }
@@ -163,6 +168,7 @@ void MR60BHA2Component::process_frame_(uint16_t frame_id, uint16_t frame_type, c
         if (current_heart_rate_int != 0) {
           float heart_rate_float;
           memcpy(&heart_rate_float, &current_heart_rate_int, sizeof(float));
+          this->last_heart_rate_ms_ = millis();
           if (this->heart_rate_sensor_->state == heart_rate_float) {
             break;
           }
@@ -171,21 +177,27 @@ void MR60BHA2Component::process_frame_(uint16_t frame_id, uint16_t frame_type, c
       }
       break;
     case DISTANCE_TYPE_BUFFER:
-      if (data[0] != 0) {
-        if (this->distance_sensor_ != nullptr && length >= 8) {
+      if (this->distance_sensor_ != nullptr && length >= 8) {
+        this->last_distance_ms_ = millis();
+        uint32_t flag = encode_uint32(data[3], data[2], data[1], data[0]);
+        if (flag == 0) {
+          if (!std::isnan(this->distance_sensor_->state)) {
+            this->distance_sensor_->publish_state(NAN);
+          }
+        } else {
           uint32_t current_distance_int = encode_uint32(data[7], data[6], data[5], data[4]);
           float distance_float;
           memcpy(&distance_float, &current_distance_int, sizeof(float));
-          if (this->distance_sensor_->state == distance_float) {
-            break;
+          if (this->distance_sensor_->state != distance_float) {
+            this->distance_sensor_->publish_state(distance_float);
           }
-          this->distance_sensor_->publish_state(distance_float);
         }
       }
       break;
     case PRINT_CLOUD_BUFFER:
       if (this->num_targets_sensor_ != nullptr && length >= 4) {
         uint32_t current_num_targets_int = encode_uint32(data[3], data[2], data[1], data[0]);
+        this->last_num_targets_ms_ = millis();
         if (this->num_targets_sensor_->state == current_num_targets_int) {
           break;
         }
@@ -195,6 +207,32 @@ void MR60BHA2Component::process_frame_(uint16_t frame_id, uint16_t frame_type, c
     default:
       break;
   }
+}
+
+void MR60BHA2Component::check_staleness_() {
+  uint32_t now = millis();
+  if (this->breath_rate_sensor_ != nullptr && this->last_breath_rate_ms_ != 0 &&
+      now - this->last_breath_rate_ms_ > STALE_TIMEOUT_MS && !std::isnan(this->breath_rate_sensor_->state)) {
+    this->breath_rate_sensor_->publish_state(NAN);
+  }
+  if (this->heart_rate_sensor_ != nullptr && this->last_heart_rate_ms_ != 0 &&
+      now - this->last_heart_rate_ms_ > STALE_TIMEOUT_MS && !std::isnan(this->heart_rate_sensor_->state)) {
+    this->heart_rate_sensor_->publish_state(NAN);
+  }
+  if (this->distance_sensor_ != nullptr && this->last_distance_ms_ != 0 &&
+      now - this->last_distance_ms_ > STALE_TIMEOUT_MS && !std::isnan(this->distance_sensor_->state)) {
+    this->distance_sensor_->publish_state(NAN);
+  }
+  if (this->num_targets_sensor_ != nullptr && this->last_num_targets_ms_ != 0 &&
+      now - this->last_num_targets_ms_ > STALE_TIMEOUT_MS && !std::isnan(this->num_targets_sensor_->state)) {
+    this->num_targets_sensor_->publish_state(NAN);
+  }
+#ifdef USE_BINARY_SENSOR
+  if (this->has_target_binary_sensor_ != nullptr && this->last_has_target_ms_ != 0 &&
+      now - this->last_has_target_ms_ > STALE_TIMEOUT_MS && this->has_target_binary_sensor_->state) {
+    this->has_target_binary_sensor_->publish_state(false);
+  }
+#endif
 }
 
 }  // namespace seeed_mr60bha2
