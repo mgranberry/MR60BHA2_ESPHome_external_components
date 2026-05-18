@@ -2,6 +2,7 @@ import esphome.codegen as cg
 from esphome.components import uart
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
+import subprocess
 
 CODEOWNERS = ["@limengdu"]
 DEPENDENCIES = ["uart"]
@@ -35,7 +36,20 @@ FINAL_VALIDATE_SCHEMA = uart.final_validate_device_schema(
 )
 
 
+def _get_git_hash():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+    git_hash = _get_git_hash()
+    version_str = f"3.5-{git_hash}"
+    cg.add_define("MR60BHA2_VERSION", version_str)

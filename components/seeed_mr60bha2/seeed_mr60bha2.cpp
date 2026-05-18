@@ -10,6 +10,18 @@ namespace seeed_mr60bha2 {
 
 static const char *const TAG = "seeed_mr60bha2";
 
+#ifndef MR60BHA2_VERSION
+#define MR60BHA2_VERSION "unknown"
+#endif
+
+void MR60BHA2Component::setup() {
+#ifdef USE_TEXT_SENSOR
+  if (this->version_text_sensor_ != nullptr) {
+    this->version_text_sensor_->publish_state(MR60BHA2_VERSION);
+  }
+#endif
+}
+
 // Prints the component's configuration data. dump_config() prints all of the component's configuration
 // items in an easy-to-read format, including the configuration key-value pairs.
 void MR60BHA2Component::dump_config() {
